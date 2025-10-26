@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Gestión de Redes WiFi por CBI</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Bootstrap (opcional para estilos bonitos) -->
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+    integrity="sha384-T3c6CoIi6uLrA9TneNEoa7RxnatzjcDSCmG1MXxSR1GAsXEV/Dwwykc2MPK8M2HN"
+    crossorigin="anonymous"
+  >
+  <style>
+    body { background: #f4f6f8; }
+    .container { background: #fff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); margin-top: 24px; }
+    .form-text { font-size: 0.9rem; }
+    .table input[type="text"], .table input[type="number"] { width: 100%; }
+    .ssid-col { min-width: 180px; }
+    .pwd-col  { min-width: 180px; }
+    .prio-col { width: 110px; }
+    .en-col   { width: 120px; text-align: center; }
+    .act-col  { width: 120px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h3 class="mb-3">Gestión de Redes WiFi (por CBI)</h3>
+
+    <div class="row g-3 mb-2">
+      <div class="col-md-4">
+        <label class="form-label">CBI del Equipo</label>
+        <input id="cbi" type="text" class="form-control" placeholder="Ej: 16550441187">
+        <div class="form-text">Debe coincidir con el CBI configurado en el firmware.</div>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">API Key (opcional)</label>
+        <input id="apiKey" type="text" class="form-control" placeholder="X-API-Key si está protegido">
+        <div class="form-text">Si el backend exige API key para /api/wifi/*, introdúcela aquí.</div>
+      </div>
+      <div class="col-md-4 d-flex align-items-end">
+        <div class="btn-group">
+          <button class="btn btn-primary" onclick="loadNetworks()">Cargar redes</button>
+          <button class="btn btn-outline-secondary" onclick="clearTable()">Limpiar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="alertBox" class="alert d-none" role="alert"></div>
+
+    <div class="table-responsive">
+      <table class="table table-bordered table-striped align-middle" id="tblNetworks">
+        <thead class="table-success">
+          <tr>
+            <th class="ssid-col">SSID</th>
+            <th class="pwd-col">Password</th>
+            <th class="prio-col">Prioridad</th>
+            <th class="en-col">Habilitada</th>
+            <th class="act-col">Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="netBody">
+          <!-- Filas dinámicas -->
+        </tbody>
+      </table>
+    </div>
+
+    <div class="d-flex gap-2">
+      <button class="btn btn-success" onclick="addRow()">+ Agregar red</button>
+      <button class="btn btn-warning" onclick="saveMerge()">Guardar (merge)</button>
+      <button class="btn btn-danger" onclick="saveReplace()">Guardar (reemplazar)</button>
+    </div>
+
+    <hr class="my-4">
+
+    <div class="alert alert-info">
+      <strong>Cómo probar un respaldo:</strong>
+      <ol class="mb-0">
+        <li>Ingresa el <b>CBI</b> y pulsa <b>Cargar redes</b>.</li>
+        <li>Pulsa <b>+ Agregar red</b>, llena <b>SSID</b> y <b>Password</b> de la red de respaldo, define <b>Prioridad</b> menor que la primaria (p.ej. primaria 120, respaldo 90) y deja <b>Habilitada</b>.</li>
+        <li>Pulsa <b>Guardar (merge)</b> para no borrar la primaria.</li>
+        <li>El equipo recibirá la actualización en su próximo envío a <code>/api/lecturas</code> y la almacenará en SD.</li>
+        <li>Cuando quites la red primaria, el equipo pasará a la de respaldo.</li>
+      </ol>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const LS_KEY = "wifi_ui_state";
+
+    function showAlert(msg, type="info") {
+      const box = $("alertBox");
+      box.className = "alert alert-" + type;
+      box.innerText = msg;
+      box.classList.remove("d-none");
+    }
+    function hideAlert() {
+      const box = $("alertBox");
+      box.classList.add("d-none");
+      box.innerText = "";
+    }
+
+    function persistState() {
+      const state = {
+        cbi: $("cbi").value.trim(),
+        apiKey: $("apiKey").value
+      };
+      localStorage.setItem(LS_KEY, JSON.stringify(state));
+    }
+
+    function restoreState() {
+      try {
+        const s = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
+        if (s.cbi) $("cbi").value = s.cbi;
+        if (s.apiKey) $("apiKey").value = s.apiKey;
+      } catch (e) {}
+    }
+
+    function clearTable() {
+      $("netBody").innerHTML = "";
+      hideAlert();
+    }
+
+    function addRow(n = {ssid:"", password:"", priority:0, enabled:true}) {
+      const tr = document.createElement("tr");
+
+      tr.innerHTML = `
+        <td><input type="text" class="form-control form-control-sm" value="${escapeHtml(n.ssid || "")}" placeholder="SSID"></td>
+        <td><input type="text" class="form-control form-control-sm" value="${escapeHtml(n.password || "")}" placeholder="Password"></td>
+        <td><input type="number" class="form-control form-control-sm" value="${Number.isFinite(n.priority)? n.priority : 0}" step="1"></td>
+        <td class="text-center"><input type="checkbox" class="form-check-input" ${n.enabled ? "checked" : ""}></td>
+        <td class="text-center"><button class="btn btn-sm btn-outline-danger" onclick="this.closest('tr').remove()">Eliminar</button></td>
+      `;
+      $("netBody").appendChild(tr);
+    }
+
+    function collectNetworks() {
+      const rows = Array.from($("netBody").querySelectorAll("tr"));
+      const nets = [];
+      for (const r of rows) {
+        const tds = r.querySelectorAll("td");
+        const ssid = tds[0].querySelector("input").value.trim();
+        const password = tds[1].querySelector("input").value;
+        const priority = parseInt(tds[2].querySelector("input").value || "0", 10);
+        const enabled = tds[3].querySelector("input").checked;
+        if (!ssid) continue; // omitir filas vacías
+        nets.push({ ssid, password, priority: Number.isFinite(priority) ? priority : 0, enabled: !!enabled });
+      }
+      return nets;
+    }
+
+    async function loadNetworks() {
+      hideAlert();
+      const cbi = $("cbi").value.trim();
+      if (!cbi) {
+        showAlert("Debes introducir un CBI.", "warning");
+        return;
+      }
+      persistState();
+      clearTable();
+
+      try {
+        const headers = {};
+        const apiKey = $("apiKey").value;
+        if (apiKey) headers["X-API-Key"] = apiKey;
+
+        const res = await fetch(`/api/wifi/get?cbi=${encodeURIComponent(cbi)}`, { headers });
+        if (!res.ok) {
+          showAlert(`Error al cargar: ${res.status}`, "danger");
+          return;
+        }
+        const data = await res.json();
+        const list = Array.isArray(data.networks) ? data.networks : [];
+        if (list.length === 0) {
+          showAlert("No hay redes configuradas para este CBI (versión: " + (data.version || 0) + ").", "info");
+        }
+        // Rellenar tabla
+        list.sort((a,b) => (b.priority||0) - (a.priority||0));
+        for (const n of list) addRow(n);
+
+        showAlert(`Cargado: versión ${data.version || 0}, redes: ${list.length}.`, "success");
+      } catch (e) {
+        showAlert("Fallo de red al cargar: " + e, "danger");
+      }
+    }
+
+    async function saveMerge() {
+      await save(false);
+    }
+
+    async function saveReplace() {
+      await save(true);
+    }
+
+    async function save(replaceFlag) {
+      hideAlert();
+      const cbi = $("cbi").value.trim();
+      if (!cbi) {
+        showAlert("Debes introducir un CBI.", "warning");
+        return;
+      }
+      const networks = collectNetworks();
+      if (networks.length === 0) {
+        showAlert("No hay redes para guardar. Agrega al menos una.", "warning");
+        return;
+      }
+      persistState();
+
+      try {
+        const headers = { "Content-Type": "application/json" };
+        const apiKey = $("apiKey").value;
+        if (apiKey) headers["X-API-Key"] = apiKey;
+
+        const body = JSON.stringify({ CBI: cbi, networks, replace: !!replaceFlag });
+        const res = await fetch("/api/wifi/put", { method: "POST", headers, body });
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          showAlert(`Error al guardar (${res.status}): ${data.error || "desconocido"}`, "danger");
+          return;
+        }
+        showAlert(`Guardado OK. Nueva versión: ${data.version}. El equipo recibirá "wifi_update" en su próximo POST a /api/lecturas.`, "success");
+      } catch (e) {
+        showAlert("Fallo de red al guardar: " + e, "danger");
+      }
+    }
+
+    function escapeHtml(s) {
+      return (s || "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    // Estado inicial
+    restoreState();
+  </script>
+</body>
+</html>
